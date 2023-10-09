@@ -15,3 +15,6 @@ It includes:
   demonstrating sufficient Gatling functionality
 * proper source file layout
   * both the `test` and `it` (integration test) configurations are shown
+
+https://scalapb.github.io/docs/getting-started/
+https://medium.com/@georgeleung_7777/a-demo-of-gatling-grpc-bc92158ca808
