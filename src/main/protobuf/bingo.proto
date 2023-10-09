@@ -1,0 +1,224 @@
+syntax = "proto3";
+
+option csharp_namespace = "com.aristocrat.ncube.b2bmc2.bingoinf.grpc";
+
+option java_package = "com.aristocrat.b2bmc2.bingo.grpc";
+
+package bingo;
+
+import "google/protobuf/timestamp.proto";
+
+message BingoAdapterState {
+    // EGMs in free pool
+    int32 remainingEGMs  = 1;
+    // EGMs already occupied by sessions
+    int32 consumedEGMs   = 2;
+
+    // current bingo adapter build version
+    string versionNumber = 3;
+
+    // CPU usage in the percentage
+    double cpuConsumptionByBingoAdapter = 4;
+    // CPU usage in the percentage
+    double cpuConsumptionTotal = 5;
+    // memory usage in MB
+    double memoryUsageByBingoAdapter = 6;
+    // available RAM memory in MB
+    double availableMemoryInTheSystem = 7;
+
+    // last ball call timestamp in UTC 
+    google.protobuf.Timestamp lastBallCallDate = 8;
+}
+
+message StartSessionRequest {
+    // the preferred Electronic Game Machine(EGM) Serial Number to be used for the joining player
+    // optional, send zero for no preference
+    int32 egmSerialNumber = 1;
+
+    // The id with which Bingo Game must be present at VGT Game Server side
+    // only values from 1 to 255 allowed (because there is only a Byte dedicated to GameSerial in Omega Protocol), and the auto-increment in BS DB starts with 1.
+    int32 gameId = 2;
+}
+
+message StartSessionResponse {
+    // the EGM SN which will be used for the player's session
+    // may differ from the requested, but must be noted as the one used for the session
+    int32 egmSerialNumber = 1;
+
+    // time to wait for answer from joinGame - for the Bingo round to start
+    int32 joinGameWaitTimeSeconds = 2;
+
+    // Bingo Card Serial Number Range -
+    // the Bingo Card to be supplied into joinGame request
+    // must have its Serial Number fitting into this range
+    int64 bingoCardSerialMin = 3;
+    int64 bingoCardSerialMax = 4;
+}
+
+message JoinBingoGameRequest {
+    // EGM SN for joining must match the one returned from StartSession
+    int32 egmSerialNumber = 1;
+
+    // must fit into the range provided as result of startSession - just for logging of the bingo card
+    int64 bingoCardSerial = 2;
+
+    // 24 numbers on the bingo card to be used on the card in this pattern
+    // also needed for logging at the adapter side
+    // left-to-right, then top-to-bottom:
+    /*
+    0, 1, 2, 3, 4,
+    5, 6, 7, 8, 9,
+    10, 11, 12, 13,     // 4 numbers in the 3rd row
+    14, 15, 16, 17, 18
+    19, 20, 21, 22, 23
+    */
+    repeated int32 bingoCardNumbers = 3;
+
+    double betAmount = 4;
+
+    // allows BingoAdapter to log the bingo rounds as they are registered on Class_2_Platform side for possible later investigation convenience
+    int64 c2pGameRoundSerial = 5;
+}
+
+message JoinBingoGameResponse {
+    // the round ID as Bingo Server has registered in its DB
+    // in case of Simulation, it will be just a random number for probabilistic distinction
+    int64 bingoRoundSerialNumber = 1;
+}
+
+message ReleaseEgmRequest{
+    int32 egmSerialNumber = 1;
+}
+
+message BallCall {
+    // new numbers which have been called since the start of the round or since the last ball call. Can be empty.
+    bytes newBalls = 1;
+    // with every ball, the round serial will come as a sign of synchronization of the states
+    int64 bingoRoundSerialNumber = 2;
+    // True means the round with number bingoRoundSerialNumber has ended - someone (maybe the same client) has called claimCoverAll successfully
+    // It also means the next ballCall (if it ever comes) will have a new round id
+    bool gameRoundEnded = 3;
+}
+
+message GenerateBingoCardRequest {
+    // range of serials for the new BingoCard
+    int64 bingoCardSerialMin = 1;
+    int64 bingoCardSerialMax = 2;
+}
+
+message GenerateBingoCardResponse {
+    // will be randomly selected from the requested range
+    int64 bingoCardSerial = 1;
+    // 24 numbers of the newly generated card
+    repeated int32 bingoCardNumbers = 2;
+}
+
+message ClaimCoverAllRequest {
+    // to represent the same client for which startSession was called, this must be the same number which has been returned as egmSerialNumber from startSession
+    int32 egmSerialNumber = 1;
+    // to ensure that the state is in sync, please send the round id in which the EGM is expected to be active. Or 0 for no checks on the adapter side.
+    int64 bingoRoundSerialNumber = 2;
+}
+
+message EmptyRequest {
+    // nothing to pass to the service
+}
+
+message EmptyResponse {
+    // a successful call doesn't return any data, just empty OK response
+}
+
+service BingoAdapterService {
+  // A maintenance endpoint for querying the current state of BingoAdapter server and its clients
+  // Possible RpcException statuses:
+  //  - Unavailable - the Adapter is not ready for the call. If this happens for some time, it is most probably misconfigured.
+  //  - Internal - error of the Adapter
+  // the call must not take more than 1 second to complete
+  rpc getStatus(EmptyRequest) returns (BingoAdapterState);
+
+  // The first call to be made for a user session - reserving an EGM ID and getting game configuration
+  // Possible RpcException statuses:
+  //  - InvalidArgument - some of the request fields are not valid
+  //  - DeadlineExceeded - Bingo Server hasn't supplied configuration within reasonable time, considered unavailable or failing, restart might be needed
+  //  - ResourceExhausted - there are no EGM Serial Numbers free for usage
+  //  - Unavailable - the Adapter is not ready for the call. If this happens for some time, it is most probably misconfigured.
+  //  - Internal - error of the Adapter
+  // the call should take less than 30 seconds if Adapter is starting and less than 3 seconds if Adapter is running for a few minutes already
+  //   (assuming that Bingo Server has also been started a few minutes ago)
+  rpc startSession(StartSessionRequest) returns (StartSessionResponse);
+
+  // Call this once before start any round of the game
+  // returns the balls stream as provided by Bingo Server, contituously all balls for all game rounds.
+  // It's responsibility of client software to distinguish balls belonging to different game rounds.
+  // SPECAL BALL CALLS:
+  //  - Empty BallCall will be sent when JoinGame gets called, to ensure the connection is alive.
+  //    Such a BallCall will contain zero Numbers and will not contain any Round Number.
+  //  - Closing BallCall will be sent when a Round ends (some of the clients did a successful claimCoverAll)
+  //  - Such a BallCall will contain zero Numbers, will retain the RoundId which was active, and will also have the flag gameRoundEnded up (=true)
+  // Possible RpcException statuses:
+  //  - Aborted - unsubscribeBingoBalls has been called
+  //  - Unavailable - the Adapter is not ready for the call. If this happens for some time, it is most probably misconfigured.
+  //  - Internal - error of the Adapter
+  // the call must not end without an error code
+  // The call can sustain the steram indefinitely, until unsubscribeBingoBalls gets called.
+  // Disconnection is unexpected, but will be handled if happens: the call will be completed and the client should re-call this method.
+  rpc subscribeToBalls(EmptyRequest) returns (stream BallCall);
+
+  // Call this to generate the Card at BingoAdapter side
+  // Possible RpcException statuses:
+  //  - InvalidArgument - some of the request fields values are not valid
+  //  - Internal - error of the Adapter
+  // the call must not take more than 1 second to complete
+  rpc generateBingoCard(GenerateBingoCardRequest) returns (GenerateBingoCardResponse);
+
+  // Call to start a game round attempt
+  // The call will wait for the round to start (which usually requires 2+ players to call joinGame, if not configured otherwise)
+  // Note: on this call, before actually joining, BA will ensure the Subscription availability by sending an empty BallCall into it.
+  // Possible RpcException statuses:
+  //  - InvalidArgument - some of the request fields are not valid
+  //  - DeadlineExceeded - game failed to start - no players
+  //  - Aborted - releaseEgm has been called for the client's EGM SN - the session ends
+  //  - Unavailable - the Adapter is not ready for the call. If this happens for some time, it is most probably misconfigured.
+  //  - Internal - error of the Adapter
+  // the call must not hang for more than joinGameWaitTimeSeconds+1s (otherwise there are probably some connectivity or performance problems)
+  rpc joinGame(JoinBingoGameRequest) returns (JoinBingoGameResponse);
+
+  // When all numbers on a card have got daubed, this endpoint can be called
+  // The call must be considered successfull if it didn't return any errors
+  // The info will be checked by Bingo Server - whether the card in the round is eligible for Game Exclusive Win (GEW)
+  // On success, the round ends: all the players stop getting balls
+  // New JoinGame attempt can be made after that by all the clients which want to keep playing.
+  // This call won't release any EGMs.
+  // Possible RpcException statutuses:
+  //  - InvalidArgument - some of the request fields are not valid
+  //  - InvalidArgument - the client is not in the specified round
+  //  - FailedPrecondition - the client is not eligible for GEW - the game has ended by other player already or the client's card is not daubed yet
+  //  - Unavailable - the Adapter is not ready for the call. If this happens for some time, it is most probably misconfigured.
+  //  - Internal - error of the Adapter. Also can happen if Bingo Server has returned some mysterious GEW status
+  // the call must not take more than 3 seconds to complete
+  rpc claimCoverAll(ClaimCoverAllRequest) returns (EmptyResponse);
+
+  // This call can be used to free an EGM from reservation by a session
+  // WARNING: if the EGM is used by a client in an ongoing round, this call will effectively run the game for the Player.
+  //    However, it is essential to call this, to make EGM available for new sessions. For example, when the Player actually quits the game.
+  // Can be called at any point after StartSession
+  // If there is a JoinGame call active at that moment, it will get Aborted exception thrown.
+  // After this call returns, the EGM is ready to StartSession again.
+  // Possible RpcException statuses:
+  //  - InvalidArgument - the egm requested is not positive or there is no such EGM with active session
+  //  - Unavailable - the Adapter is not ready for the call. If this happens for some time, it is most probably misconfigured.
+  //  - Internal - error of the Adapter
+  // the call must not take more than 3 seconds to complete
+  rpc releaseEgm(ReleaseEgmRequest) returns (EmptyResponse);
+
+  // This call can be used to stop balls subscription initiated by subscribeToBalls call.
+  // Can be called at any point after subscribeToBalls
+  // This call stops the current subscription by throwing Aborted exception
+  // If there is a JoinGame task active at that moment, it will also get Cancelled exception thrown
+  // After this call returns, it is possible to re-connect by calling subscribeToBalls again.
+  // Possible RpcException statuses:
+  //  - Unavailable - the Adapter is not ready for the call. If this happens for some time, it is most probably misconfigured.
+  //  - Internal - error of the Adapter
+  // the call must not take more than 3 seconds to complete
+  rpc unsubscribeBingoBalls(EmptyRequest) returns (EmptyResponse);
+}
